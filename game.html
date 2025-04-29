@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DeepHex Game</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <button id="debugBtn" class="debug-button">Debug</button>
+
+
+  <div id="room-code-display" class="above-canvas"></div>
+
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+  <div class="sidebar">
+    <div id="turn-display">Waiting...</div>
+    <div>HP: <span id="unit-hp">-</span></div>
+    <div>MP: <span id="unit-mp">-</span></div>
+    <div>AP: <span id="unit-ap">-</span></div>
+    <button id="endTurnBtn">End Turn</button>
+    <button id="actionBtn">Action</button>
+    <button id="selectUnitBtn">Select Unit</button>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script type="module">
+    import { supabase } from './lib/supabase.js';
+    import { setState, getState } from './game/game-state.js';
+    import { drawMap, updateTurnDisplay, updateGameUI } from './game/ui.js';
+    import { endTurn, performAction } from './game/units.js';
+
+    async function listenToGameRoomUpdates(roomId) {
+      const channel = supabase.channel(`game-${roomId}`);
+      channel.on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'lobbies',
+        filter: `id=eq.${roomId}`
+      }, (payload) => {
+        const current = getState();
+        const newState = payload.new;
+
+        const unitsChanged = JSON.stringify(current.units) !== JSON.stringify(newState.units);
+        const turnChanged = current.currentTurn !== newState.turn;
+
+        if (unitsChanged || turnChanged) {
+          console.log('[Realtime] Game state updated.');
+          setState({
+            ...current,
+            units: newState.units,
+            currentTurn: newState.turn,
+            map: newState.map // If you want map update too (safe)
+          });
+          updateGameUI();
+        }
+      });
+      channel.subscribe();
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      document.getElementById('debugBtn')?.addEventListener('click', () => {
+        import('./game/ui.js').then(mod => mod.toggleDebugMode());
+      });
+
+      const params = new URLSearchParams(window.location.search);
+      const room_code = params.get('room');
+      const playerFlag = params.get('player');
+      const playerId = playerFlag === '2' ? 'player2' : 'player1';
+
+      const codeBox = document.getElementById('room-code-display');
+      if (codeBox) codeBox.textContent = `Room Code: ${room_code}`;
+
+      if (!room_code) {
+        alert('Missing room code.');
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('lobbies')
+        .select('*')
+        .eq('room_code', room_code)
+        .single();
+
+      if (error || !data) {
+        alert('Could not load lobby.');
+        console.error(error);
+        return;
+      }
+
+      const state = {
+        map: data.map,
+        units: data.units,
+        turn: data.turn
+      };
+
+      setState({
+        playerId,
+        roomId: data.id,
+        map: state.map,
+        units: state.units,
+        currentTurn: state.turn,
+        player2Seen: data.player_2
+      });
+
+      drawMap();
+      updateTurnDisplay(state.turn);
+
+      // ✅ Realtime sync
+      listenToGameRoomUpdates(data.id);
+
+      document.getElementById('endTurnBtn')?.addEventListener('click', () => {
+        const s = getState();
+        if (s.currentTurn === s.playerId) {
+          endTurn();
+        }
+      });
+
+      document.getElementById('actionBtn')?.addEventListener('click', () => {
+        const s = getState();
+        const unit = s.units.find(u => u.owner === s.playerId);
+        if (unit) {
+          performAction(unit.id, unit.x + 1, unit.y);
+        }
+      });
+
+      document.getElementById('selectUnitBtn')?.addEventListener('click', () => {
+        const s = getState();
+        if (s.currentTurn !== s.playerId) return;
+        const unit = s.units.find(u => u.owner === s.playerId);
+        if (unit) {
+          s.selectedUnitId = unit.id;
+          setState(s);
+          updateGameUI();
+        }
+      });
+    });
+  </script>
+
+</body>
+</html>
+
+
